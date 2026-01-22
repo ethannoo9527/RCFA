@@ -1,5 +1,3 @@
-## USE THIS ONE FOR COMP
-
 # This is a python example algorithm using REST API for the RIT ALGO2 Case
 import signal
 import requests
@@ -58,11 +56,6 @@ def get_orders(session, status):
         raise ApiException('The API key provided in this Python code must match that in the RIT client (please refer to the API hyperlink in the client toolbar and/or the RIT – User Guide – REST API Documentation.pdf)')
     orders = resp.json()
     return orders
-
-def get_order_id(order):
-    if not isinstance(order, dict):
-        return None
-    return order.get('order_id') or order.get('id')
 
 def get_top_of_book(session, ticker):
     # Common RIT endpoint; adjust if your API differs
@@ -163,9 +156,9 @@ def compute_trade_volumes(
         return min_volume, min_volume
 
     edge_ratio = min(1.0, max(0.0, edge / market_spread))
-    edge_scale = 0.7 + 0.3 * edge_ratio
-    liq_ratio = min(2.0, max(0.0, liquidity / float(liquidity_target))) if liquidity_target > 0 else 1.0
-    liq_scale = 0.7 + 0.3 * liq_ratio
+    edge_scale = 0.5 + 0.5 * edge_ratio
+    liq_ratio = min(1.0, max(0.0, liquidity / float(liquidity_target))) if liquidity_target > 0 else 1.0
+    liq_scale = 0.5 + 0.5 * liq_ratio
 
     long_headroom = max(0.0, max_long - pos)
     short_headroom = max(0.0, max_short + pos)
@@ -208,10 +201,10 @@ def main():
     SELL_DISCOUNT = 0.002     # small discount to improve sell execution
     PRICE_CUSHION = 0.001     # avoid crossing the spread
     ORDER_TTL_TICKS = 4       # how long to let orders rest before canceling
-    BASE_VOLUME = 3500        # used as a ceiling for dynamic sizing
-    MIN_TRADE_VOLUME = 2000
-    MAX_TRADE_VOLUME = 6000
-    LIQUIDITY_TARGET = 3000
+    BASE_VOLUME = 1500        # used as a ceiling for dynamic sizing
+    MIN_TRADE_VOLUME = 600
+    MAX_TRADE_VOLUME = 4500
+    LIQUIDITY_TARGET = 5000
     SLEEP_SEC = 0.25
     order_ticks = {}
 
@@ -302,7 +295,7 @@ def main():
 
             # 4) Read your open orders and identify current bid/ask
             open_orders = get_orders(s, 'OPEN')
-            open_order_ids = {get_order_id(o) for o in open_orders if get_order_id(o) is not None}
+            open_order_ids = {o.get('order_id') for o in open_orders if o.get('order_id') is not None}
             for oid in list(order_ticks):
                 if oid not in open_order_ids:
                     order_ticks.pop(oid, None)
@@ -310,7 +303,7 @@ def main():
             my_bid = None
             my_ask = None
             for o in open_orders:
-                order_id = get_order_id(o)
+                order_id = o.get('order_id')
                 if order_id is None:
                     continue
                 if o.get('ticker') != TICKER:
@@ -336,15 +329,12 @@ def main():
             for o in open_orders:
                 if o.get('ticker') != TICKER:
                     continue
-                order_id = get_order_id(o)
-                if order_id is None:
-                    continue
-                if my_bid and o.get('action') == 'BUY' and order_id != get_order_id(my_bid):
-                    cancel_order(s, order_id)
-                    order_ticks.pop(order_id, None)
-                if my_ask and o.get('action') == 'SELL' and order_id != get_order_id(my_ask):
-                    cancel_order(s, order_id)
-                    order_ticks.pop(order_id, None)
+                if my_bid and o.get('action') == 'BUY' and o.get('order_id') != my_bid.get('order_id'):
+                    cancel_order(s, o.get('order_id'))
+                    order_ticks.pop(o.get('order_id'), None)
+                if my_ask and o.get('action') == 'SELL' and o.get('order_id') != my_ask.get('order_id'):
+                    cancel_order(s, o.get('order_id'))
+                    order_ticks.pop(o.get('order_id'), None)
 
             # 6) Requote logic: only replace if price is stale by REQUOTE_TOL
             # BUY side
@@ -355,20 +345,16 @@ def main():
                         order_ticks[order_id] = tick
                 else:
                     if abs(my_bid.get('price', 0) - quote_bid) >= REQUOTE_TOL:
-                        bid_id = get_order_id(my_bid)
-                        if bid_id is not None:
-                            cancel_order(s, bid_id)
-                            order_ticks.pop(bid_id, None)
+                        cancel_order(s, my_bid.get('order_id'))
+                        order_ticks.pop(my_bid.get('order_id'), None)
                         order_id = place_limit(s, TICKER, 'BUY', buy_qty, quote_bid)
                         if order_id is not None:
                             order_ticks[order_id] = tick
             else:
                 # If buying not allowed, cancel existing buy
                 if my_bid is not None:
-                    bid_id = get_order_id(my_bid)
-                    if bid_id is not None:
-                        cancel_order(s, bid_id)
-                        order_ticks.pop(bid_id, None)
+                    cancel_order(s, my_bid.get('order_id'))
+                    order_ticks.pop(my_bid.get('order_id'), None)
 
             # SELL side
             if allow_sell:
@@ -378,19 +364,15 @@ def main():
                         order_ticks[order_id] = tick
                 else:
                     if abs(my_ask.get('price', 0) - quote_ask) >= REQUOTE_TOL:
-                        ask_id = get_order_id(my_ask)
-                        if ask_id is not None:
-                            cancel_order(s, ask_id)
-                            order_ticks.pop(ask_id, None)
+                        cancel_order(s, my_ask.get('order_id'))
+                        order_ticks.pop(my_ask.get('order_id'), None)
                         order_id = place_limit(s, TICKER, 'SELL', sell_qty, quote_ask)
                         if order_id is not None:
                             order_ticks[order_id] = tick
             else:
                 if my_ask is not None:
-                    ask_id = get_order_id(my_ask)
-                    if ask_id is not None:
-                        cancel_order(s, ask_id)
-                        order_ticks.pop(ask_id, None)
+                    cancel_order(s, my_ask.get('order_id'))
+                    order_ticks.pop(my_ask.get('order_id'), None)
 
             sleep(SLEEP_SEC)
             tick = get_tick(s)
@@ -399,5 +381,3 @@ def main():
 if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
     main()
-
-# USE THIS FOR COMP!
