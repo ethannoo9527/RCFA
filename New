@@ -124,10 +124,34 @@ def get_all_positions(session):
                 positions[ticker] = item.get('position', 0)
     return positions
 
+def oid(order):
+    """Return the order's identifier regardless of schema."""
+    return order.get('order_id') or order.get('id')
+
 def cancel_order(session, order_id):
-    # Some RIT APIs cancel by POST /v1/orders/cancel or DELETE /v1/orders/{id}
-    # Adjust to match your client. This is a common pattern:
-    session.post('http://localhost:9999/v1/commands/cancel', params={'id': order_id})
+    """
+    Robust cancel: tries common RIT cancel patterns.
+    If your client only supports one, the others will just fail harmlessly.
+    """
+    if order_id is None:
+        return False
+
+    # 1) Command-style cancel (some clients)
+    r = session.post('http://localhost:9999/v1/commands/cancel', params={'id': order_id})
+    if r.status_code in (200, 201, 204):
+        return True
+
+    # 2) Orders cancel endpoint (some clients)
+    r = session.post('http://localhost:9999/v1/orders/cancel', params={'id': order_id})
+    if r.status_code in (200, 201, 204):
+        return True
+
+    # 3) RESTful delete (some clients)
+    r = session.delete(f'http://localhost:9999/v1/orders/{order_id}')
+    if r.status_code in (200, 201, 204):
+        return True
+
+    return False
 
 def place_limit(session, ticker, side, qty, price):
     payload = {'ticker': ticker, 'type': 'LIMIT', 'quantity': qty, 'action': side, 'price': price}
@@ -295,46 +319,57 @@ def main():
 
             # 4) Read your open orders and identify current bid/ask
             open_orders = get_orders(s, 'OPEN')
-            open_order_ids = {o.get('order_id') for o in open_orders if o.get('order_id') is not None}
-            for oid in list(order_ticks):
-                if oid not in open_order_ids:
-                    order_ticks.pop(oid, None)
+            open_order_ids = {oid(o) for o in open_orders if oid(o) is not None}
+
+            # remove tick-tracking for orders that are no longer open
+            for tracked in list(order_ticks.keys()):
+                if tracked not in open_order_ids:
+                    order_ticks.pop(tracked, None)
 
             my_bid = None
             my_ask = None
+            
             for o in open_orders:
-                order_id = o.get('order_id')
+                order_id = oid(o)
                 if order_id is None:
                     continue
-                if o.get('ticker') != TICKER:
-                    cancel_order(s, order_id)
-                    order_ticks.pop(order_id, None)
-                    continue
-                if order_id not in order_ticks:
-                    order_ticks[order_id] = tick
-                if (tick - order_ticks[order_id]) >= ORDER_TTL_TICKS:
-                    cancel_order(s, order_id)
-                    order_ticks.pop(order_id, None)
-                    continue
-                if o.get('action') == 'BUY':
-                    # if multiple, keep the best-priced one and cancel others later
-                    if (my_bid is None) or (o.get('price', -1e9) > my_bid.get('price', -1e9)):
-                        my_bid = o
-                elif o.get('action') == 'SELL':
-                    if (my_ask is None) or (o.get('price', 1e9) < my_ask.get('price', 1e9)):
-                        my_ask = o
+        
+            # cancel orders for other tickers
+            if o.get('ticker') != TICKER:
+                cancel_order(s, order_id)
+                order_ticks.pop(order_id, None)
+                continue
+        
+            # start TTL clock when first seen
+            if order_id not in order_ticks:
+                order_ticks[order_id] = tick
+        
+            # TTL expiry => cancel
+            if (tick - order_ticks[order_id]) >= ORDER_TTL_TICKS:
+                cancel_order(s, order_id)
+                order_ticks.pop(order_id, None)
+                continue
+        
+            if o.get('action') == 'BUY':
+                if (my_bid is None) or (o.get('price', -1e9) > my_bid.get('price', -1e9)):
+                    my_bid = o
+            elif o.get('action') == 'SELL':
+                if (my_ask is None) or (o.get('price', 1e9) < my_ask.get('price', 1e9)):
+                    my_ask = o
 
             # 5) Clean up extra orders (keep at most one BUY and one SELL)
-            # Cancel any "extra" ALGO orders that are not the chosen my_bid/my_ask
             for o in open_orders:
                 if o.get('ticker') != TICKER:
                     continue
-                if my_bid and o.get('action') == 'BUY' and o.get('order_id') != my_bid.get('order_id'):
-                    cancel_order(s, o.get('order_id'))
-                    order_ticks.pop(o.get('order_id'), None)
-                if my_ask and o.get('action') == 'SELL' and o.get('order_id') != my_ask.get('order_id'):
-                    cancel_order(s, o.get('order_id'))
-                    order_ticks.pop(o.get('order_id'), None)
+                order_id = oid(o)
+            
+                if my_bid and o.get('action') == 'BUY' and order_id != oid(my_bid):
+                    cancel_order(s, order_id)
+                    order_ticks.pop(order_id, None)
+            
+                if my_ask and o.get('action') == 'SELL' and order_id != oid(my_ask):
+                    cancel_order(s, order_id)
+                    order_ticks.pop(order_id, None)
 
             # 6) Requote logic: only replace if price is stale by REQUOTE_TOL
             # BUY side
