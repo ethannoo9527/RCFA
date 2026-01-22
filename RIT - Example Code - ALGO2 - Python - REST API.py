@@ -14,7 +14,7 @@ def signal_handler(signum, frame):
     shutdown = True
 
 # set your API key to authenticate to the RIT client
-API_KEY = {'X-API-Key': 'YOUR API KEY HERE'}
+API_KEY = {'X-API-Key': 'EZ91106P'}
 shutdown = False
 # other settings for market making algo
 SPREAD = 0.02
