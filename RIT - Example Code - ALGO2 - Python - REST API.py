@@ -21,15 +21,6 @@ SPREAD = 0.02
 BUY_VOLUME = 500
 SELL_VOLUME = 500
 
-
-BASE_SPREAD = 0.02          # start here (like your SPREAD)
-MIN_SPREAD  = 0.005         # don't go tighter than this (avoid giving away edge)
-MAX_SPREAD  = 0.08          # don't go wider than this (or you'll never fill)
-
-NO_FILL_TICKS_TO_TIGHTEN = 5   # if no fills for 5 ticks, tighten
-TIGHTEN_FACTOR = 0.85          # multiply spread by this to tighten
-WIDEN_FACTOR   = 1.20          # widen after fills (optional)
-
 # this helper method returns the current 'tick' of the running case
 def get_tick(session):
     resp = session.get('http://localhost:9999/v1/case')
@@ -106,91 +97,119 @@ def cancel_order(session, order_id):
 def place_limit(session, ticker, side, qty, price):
     payload = {'ticker': ticker, 'type': 'LIMIT', 'quantity': qty, 'action': side, 'price': price}
     session.post('http://localhost:9999/v1/orders', params=payload)
-    
-def count_transacted(session):
-    transacted = get_orders(session, 'TRANSACTED')
-    return len(transacted)
 
 def main():
     global shutdown
+
     TICKER = 'ALGO'
+
+    # --- New risk/quote knobs ---
+    MAX_POS = 2000            # hard inventory limit
+    BASE_EDGE = 0.01          # your minimum edge per side (like half-spread)
+    REQUOTE_TOL = 0.01        # only replace if we're off by >= this much
+    MIN_MARKET_SPREAD = 0.02  # don’t quote if market spread too tiny (edge gone)
+    SLEEP_SEC = 0.25
 
     with requests.Session() as s:
         s.headers.update(API_KEY)
 
         tick = get_tick(s)
 
-        # Adaptive state
-        spread = BASE_SPREAD
-        last_transacted_count = count_transacted(s)
-        last_fill_tick = tick
-
         while (not shutdown) and (tick > 5) and (tick < 295):
+            # 1) Read market
+            best_bid, best_ask = get_top_of_book(s, TICKER)
 
-            # Read current state
+            # If book is empty or broken, just wait
+            if best_bid is None or best_ask is None or best_ask <= best_bid:
+                sleep(SLEEP_SEC)
+                tick = get_tick(s)
+                continue
+
+            market_spread = best_ask - best_bid
+            mid = (best_bid + best_ask) / 2.0
+
+            # Optional: if the market spread is too tight, no room to make edge
+            if market_spread < MIN_MARKET_SPREAD:
+                sleep(SLEEP_SEC)
+                tick = get_tick(s)
+                continue
+
+            # 2) Risk state
+            pos = get_position(s, TICKER)
+
+            # If too long/short, stop quoting the side that increases risk
+            allow_buy = (pos < MAX_POS)
+            allow_sell = (pos > -MAX_POS)
+
+            # 3) Compute dynamic quotes (simple version)
+            # Edge: at least BASE_EDGE, but also respect a fraction of the market spread
+            edge = max(BASE_EDGE, 0.25 * market_spread)
+
+            # Inventory skew: push quotes to reduce inventory
+            # If long (+pos): push both quotes DOWN to encourage selling / discourage buying
+            # If short (-pos): push both quotes UP to encourage buying / discourage selling
+            k = 0.00001  # tune this (bigger = more aggressive inventory control)
+            skew = k * pos
+
+            desired_bid = (mid - edge) - skew
+            desired_ask = (mid + edge) - skew
+
+            # 4) Read your open orders and identify current bid/ask
             open_orders = get_orders(s, 'OPEN')
-            algo_close = ticker_close(s, TICKER)
 
-            # Detect fills by checking transacted count
-            transacted_count = count_transacted(s)
-            got_fill = (transacted_count > last_transacted_count)
-            if got_fill:
-                last_transacted_count = transacted_count
-                last_fill_tick = tick
+            my_bid = None
+            my_ask = None
+            for o in open_orders:
+                if o.get('ticker') != TICKER:
+                    continue
+                if o.get('action') == 'BUY':
+                    # if multiple, keep the best-priced one and cancel others later
+                    if (my_bid is None) or (o.get('price', -1e9) > my_bid.get('price', -1e9)):
+                        my_bid = o
+                elif o.get('action') == 'SELL':
+                    if (my_ask is None) or (o.get('price', 1e9) < my_ask.get('price', 1e9)):
+                        my_ask = o
 
-                # Optional: after getting fills, widen a bit to reduce adverse selection
-                spread = min(MAX_SPREAD, spread * WIDEN_FACTOR)
+            # 5) Clean up extra orders (keep at most one BUY and one SELL)
+            # Cancel any "extra" ALGO orders that are not the chosen my_bid/my_ask
+            for o in open_orders:
+                if o.get('ticker') != TICKER:
+                    continue
+                if my_bid and o.get('action') == 'BUY' and o.get('order_id') != my_bid.get('order_id'):
+                    cancel_order(s, o.get('order_id'))
+                if my_ask and o.get('action') == 'SELL' and o.get('order_id') != my_ask.get('order_id'):
+                    cancel_order(s, o.get('order_id'))
 
-            # If no fills for a while, tighten (become more competitive)
-            if (tick - last_fill_tick) >= NO_FILL_TICKS_TO_TIGHTEN:
-                spread = max(MIN_SPREAD, spread * TIGHTEN_FACTOR)
-                # reset the clock so we don't tighten every single loop tick
-                last_fill_tick = tick
-
-            # --- Order management (keep it close to your original style) ---
-
-            # If no open orders, place a pair
-            if len(open_orders) == 0:
-                buy_payload = {
-                    'ticker': TICKER, 'type': 'LIMIT', 'quantity': BUY_VOLUME,
-                    'action': 'BUY', 'price': algo_close - spread
-                }
-                sell_payload = {
-                    'ticker': TICKER, 'type': 'LIMIT', 'quantity': SELL_VOLUME,
-                    'action': 'SELL', 'price': algo_close + spread
-                }
-                s.post('http://localhost:9999/v1/orders', params=buy_payload)
-                s.post('http://localhost:9999/v1/orders', params=sell_payload)
-                sleep(1)
-
-            else:
-                # If your open orders aren't exactly a clean pair, cancel & re-quote
-                # (You can improve this later to cancel only the wrong side.)
-                if len(open_orders) != 2:
-                    s.post('http://localhost:9999/v1/commands/cancel?all=1')
-                    sleep(1)
-
-                # Re-quote periodically so you follow the market (and apply new spread)
-                # Simple rule: always cancel+replace each loop (still crude but works)
+            # 6) Requote logic: only replace if price is stale by REQUOTE_TOL
+            # BUY side
+            if allow_buy:
+                if my_bid is None:
+                    place_limit(s, TICKER, 'BUY', BUY_VOLUME, desired_bid)
                 else:
-                    s.post('http://localhost:9999/v1/commands/cancel?all=1')
-                    sleep(0.2)
+                    if abs(my_bid.get('price', 0) - desired_bid) >= REQUOTE_TOL:
+                        cancel_order(s, my_bid.get('order_id'))
+                        place_limit(s, TICKER, 'BUY', BUY_VOLUME, desired_bid)
+            else:
+                # If buying not allowed, cancel existing buy
+                if my_bid is not None:
+                    cancel_order(s, my_bid.get('order_id'))
 
-                    buy_payload = {
-                        'ticker': TICKER, 'type': 'LIMIT', 'quantity': BUY_VOLUME,
-                        'action': 'BUY', 'price': algo_close - spread
-                    }
-                    sell_payload = {
-                        'ticker': TICKER, 'type': 'LIMIT', 'quantity': SELL_VOLUME,
-                        'action': 'SELL', 'price': algo_close + spread
-                    }
-                    s.post('http://localhost:9999/v1/orders', params=buy_payload)
-                    s.post('http://localhost:9999/v1/orders', params=sell_payload)
+            # SELL side
+            if allow_sell:
+                if my_ask is None:
+                    place_limit(s, TICKER, 'SELL', SELL_VOLUME, desired_ask)
+                else:
+                    if abs(my_ask.get('price', 0) - desired_ask) >= REQUOTE_TOL:
+                        cancel_order(s, my_ask.get('order_id'))
+                        place_limit(s, TICKER, 'SELL', SELL_VOLUME, desired_ask)
+            else:
+                if my_ask is not None:
+                    cancel_order(s, my_ask.get('order_id'))
 
+            sleep(SLEEP_SEC)
             tick = get_tick(s)
 
 # this calls the main() method when you type 'python algo2.py' into the command prompt
 if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
     main()
-
