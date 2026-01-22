@@ -7,14 +7,6 @@ from time import sleep
 class ApiException(Exception):
     pass
 
-BASE_SPREAD = 0.02          # start here (like your SPREAD)
-MIN_SPREAD  = 0.005         # don't go tighter than this (avoid giving away edge)
-MAX_SPREAD  = 0.08          # don't go wider than this (or you'll never fill)
-
-NO_FILL_TICKS_TO_TIGHTEN = 5   # if no fills for 5 ticks, tighten
-TIGHTEN_FACTOR = 0.85          # multiply spread by this to tighten
-WIDEN_FACTOR   = 1.20          # widen after fills (optional)
-
 # this signal handler allows for a graceful shutdown when CTRL+C is pressed
 def signal_handler(signum, frame):
     global shutdown
@@ -28,6 +20,15 @@ shutdown = False
 SPREAD = 0.02
 BUY_VOLUME = 500
 SELL_VOLUME = 500
+
+
+BASE_SPREAD = 0.02          # start here (like your SPREAD)
+MIN_SPREAD  = 0.005         # don't go tighter than this (avoid giving away edge)
+MAX_SPREAD  = 0.08          # don't go wider than this (or you'll never fill)
+
+NO_FILL_TICKS_TO_TIGHTEN = 5   # if no fills for 5 ticks, tighten
+TIGHTEN_FACTOR = 0.85          # multiply spread by this to tighten
+WIDEN_FACTOR   = 1.20          # widen after fills (optional)
 
 # this helper method returns the current 'tick' of the running case
 def get_tick(session):
@@ -192,3 +193,4 @@ def main():
 if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
     main()
+
