@@ -335,27 +335,27 @@ def main():
                     continue
         
             # cancel orders for other tickers
-            if o.get('ticker') != TICKER:
-                cancel_order(s, order_id)
-                order_ticks.pop(order_id, None)
-                continue
+                if o.get('ticker') != TICKER:
+                    cancel_order(s, order_id)
+                    order_ticks.pop(order_id, None)
+                    continue
         
-            # start TTL clock when first seen
-            if order_id not in order_ticks:
-                order_ticks[order_id] = tick
-        
-            # TTL expiry => cancel
-            if (tick - order_ticks[order_id]) >= ORDER_TTL_TICKS:
-                cancel_order(s, order_id)
-                order_ticks.pop(order_id, None)
-                continue
-        
-            if o.get('action') == 'BUY':
-                if (my_bid is None) or (o.get('price', -1e9) > my_bid.get('price', -1e9)):
-                    my_bid = o
-            elif o.get('action') == 'SELL':
-                if (my_ask is None) or (o.get('price', 1e9) < my_ask.get('price', 1e9)):
-                    my_ask = o
+                # start TTL clock when first seen
+                if order_id not in order_ticks:
+                    order_ticks[order_id] = tick
+            
+                # TTL expiry => cancel
+                if (tick - order_ticks[order_id]) >= ORDER_TTL_TICKS:
+                    cancel_order(s, order_id)
+                    order_ticks.pop(order_id, None)
+                    continue
+            
+                if o.get('action') == 'BUY':
+                    if (my_bid is None) or (o.get('price', -1e9) > my_bid.get('price', -1e9)):
+                        my_bid = o
+                elif o.get('action') == 'SELL':
+                    if (my_ask is None) or (o.get('price', 1e9) < my_ask.get('price', 1e9)):
+                        my_ask = o
 
             # 5) Clean up extra orders (keep at most one BUY and one SELL)
             for o in open_orders:

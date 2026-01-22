@@ -202,16 +202,22 @@ def main():
     PRICE_CUSHION = 0.001     # avoid crossing the spread
     ORDER_TTL_TICKS = 4       # how long to let orders rest before canceling
     BASE_VOLUME = 3500        # used as a ceiling for dynamic sizing
-    MIN_TRADE_VOLUME = 2000
+    MIN_TRADE_VOLUME = 1200
     MAX_TRADE_VOLUME = 6000
     LIQUIDITY_TARGET = 3000
+    WARMUP_TICKS = 10         # lower sizing only
+    RAMP_TICKS = 20           # linearly scale to full size
+    WARMUP_VOLUME_SCALE = 0.25
+    RAMP_START_SCALE = 0.4
     SLEEP_SEC = 0.25
     order_ticks = {}
+    last_mode = None
 
     with requests.Session() as s:
         s.headers.update(API_KEY)
 
         tick = get_tick(s)
+        start_tick = tick
 
         while (not shutdown) and (tick > 5) and (tick < 295):
             # 1) Decide which ticker to trade (no cycling)
@@ -275,6 +281,26 @@ def main():
                 tick = get_tick(s)
                 continue
 
+            elapsed = max(0, tick - start_tick)
+            if elapsed < WARMUP_TICKS:
+                phase_scale = WARMUP_VOLUME_SCALE
+                mode = 'warmup'
+            elif elapsed < (WARMUP_TICKS + RAMP_TICKS):
+                ramp_progress = (elapsed - WARMUP_TICKS) / float(max(1, RAMP_TICKS))
+                phase_scale = RAMP_START_SCALE + (1.0 - RAMP_START_SCALE) * ramp_progress
+                mode = 'ramp'
+            else:
+                phase_scale = 1.0
+                mode = 'normal'
+
+            if mode != last_mode:
+                print("Mode switch: {} at tick {}".format(mode, tick))
+                last_mode = mode
+
+            scaled_base_volume = max(1, int(BASE_VOLUME * phase_scale))
+            scaled_min_volume = max(1, int(MIN_TRADE_VOLUME * phase_scale))
+            scaled_max_volume = max(scaled_min_volume, int(MAX_TRADE_VOLUME * phase_scale))
+
             top_liquidity = min(bid_size, ask_size)
             buy_qty, sell_qty = compute_trade_volumes(
                 market_spread,
@@ -283,9 +309,9 @@ def main():
                 pos,
                 MAX_LONG_EXPOSURE,
                 MAX_SHORT_EXPOSURE,
-                BASE_VOLUME,
-                MIN_TRADE_VOLUME,
-                MAX_TRADE_VOLUME,
+                scaled_base_volume,
+                scaled_min_volume,
+                scaled_max_volume,
                 LIQUIDITY_TARGET,
             )
             if (gross_pos + buy_qty) > MAX_GROSS_POS or (net_pos + buy_qty) > MAX_NET_POS:
