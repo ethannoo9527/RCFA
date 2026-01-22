@@ -19,6 +19,12 @@ shutdown = False
 
 
 # --- Volume optimization knobs ---
+MAX_POS = 2000
+BASE_EDGE = 0.01
+REQUOTE_TOL = 0.01
+MIN_MARKET_SPREAD = 0.02
+SLEEP_SEC = 0.25
+
 BASE_QTY = 500          # normal quoting size
 MIN_QTY  = 100          # smallest quote size
 MAX_QTY  = 3000         # cap size so you don't blow up inventory
@@ -269,3 +275,4 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
 
     main()
+
